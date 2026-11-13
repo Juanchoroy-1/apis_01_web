@@ -1,91 +1,119 @@
+import { db } from "./db.js";
 import express from "express";
 
-const servidor = express();
-servidor.use(express.json());
-servidor.set("json spaces", 2);
+const app = express();
+app.use(express.json());
+app.set("json spaces", 2);
 
-let inventario = [
-    { codigo: 1, producto: "Portátil Lenovo", costo: 2500000, unidades: 12 },
-    { codigo: 2, producto: "Tablet Samsung", costo: 950000, unidades: 25 },
-    { codigo: 3, producto: "Impresora multifuncional", costo: 680000, unidades: 18 },
-    { codigo: 4, producto: "Parlante Bluetooth", costo: 125000, unidades: 52 },
-    { codigo: 5, producto: "Cargador inalámbrico", costo: 85000, unidades: 29 },
-    { codigo: 6, producto: "Disco duro externo 1TB", costo: 280000, unidades: 33 },
-    { codigo: 7, producto: "Smartwatch", costo: 320000, unidades: 120 },
-    { codigo: 8, producto: "Router WiFi 6", costo: 190000, unidades: 24 }
-];
-
-let contadorCodigo = 9;
-
-servidor.use((req, res, next) => {
-    const hora = new Date().toLocaleTimeString("es-CO");
-    console.log(`${hora} -> ${req.method} ${req.originalUrl}`);
+app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
     next();
 });
 
-const esNumeroValido = (valor) => typeof valor === "number" && !Number.isNaN(valor) && valor >= 0;
+app.get("/inventario", async (req, res) => {
+    try {
+        const { titulo } = req.query;
+        if (titulo) {
+            const [filas] = await db.query("SELECT * FROM productos WHERE titulo LIKE ?", [`%${titulo}%`]);
+            return res.status(200).json(filas);
+        }
+        const [filas] = await db.query("SELECT * FROM productos");
+        res.status(200).json(filas);
+    } catch (error) {
+        res.status(500).json({ error: "Error en la base de datos" });
+    }
+});
 
-servidor.get("/inventario", (req, res) => {
-    const { buscar } = req.query;
-    if (buscar) {
-        const resultado = inventario.filter((item) =>
-            item.producto.toLowerCase().includes(buscar.toLowerCase())
+app.get("/inventario/:id", async (req, res) => {
+    try {
+        const [filas] = await db.query("SELECT * FROM productos WHERE id = ?", [req.params.id]);
+        if (filas.length === 0) {
+            return res.status(404).json({ error: "Artículo no encontrado" });
+        }
+        res.status(200).json(filas[0]);
+    } catch (error) {
+        res.status(500).json({ error: "Error en la base de datos" });
+    }
+});
+
+app.post("/inventario", async (req, res) => {
+    try {
+        const { titulo, valor, existencias } = req.body;
+        if (!titulo || valor === undefined) {
+            return res.status(400).json({ error: "Datos incompletos: titulo y valor son requeridos" });
+        }
+        const stock = existencias !== undefined ? existencias : 0;
+        
+        const [resultado] = await db.query(
+            "INSERT INTO productos (nombre, precio, stock) VALUES (?, ?, ?)",
+            [titulo, valor, stock]
         );
-        return res.status(200).json(resultado);
+        
+        res.status(201).json({ id: resultado.insertId, titulo, valor, existencias: stock });
+    } catch (error) {
+        res.status(500).json({ error: "Error en la base de datos" });
     }
-    res.status(200).json(inventario);
 });
 
-servidor.get("/inventario/:codigo", (req, res) => {
-    const codigo = Number(req.params.codigo);
-    const item = inventario.find((x) => x.codigo === codigo);
-    if (!item) return res.status(404).json({ mensaje: "El producto no existe en el inventario" });
-    res.json(item);
-});
+app.put("/inventario/:id", async (req, res) => {
+    try {
+        const { titulo, valor, existencias } = req.body;
+        if (!titulo || valor === undefined || existencias === undefined) {
+            return res.status(400).json({ error: "Datos incompletos: titulo, valor y existencias son requeridos" });
+        }
 
-servidor.post("/inventario", (req, res) => {
-    const { producto, costo } = req.body;
-    if (!producto || !esNumeroValido(costo)) {
-        return res.status(400).json({ mensaje: "Debes enviar 'producto' y un 'costo' numérico válido" });
+        const [resultado] = await db.query(
+            "UPDATE productos SET nombre = ?, precio = ?, stock = ? WHERE id = ?",
+            [titulo, valor, existencias, req.params.id]
+        );
+
+        if (resultado.affectedRows === 0) {
+            return res.status(404).json({ error: "Artículo no encontrado" });
+        }
+
+        res.status(200).json({ id: Number(req.params.id), titulo, valor, existencias });
+    } catch (error) {
+        res.status(500).json({ error: "Error en la base de datos" });
     }
-    const nuevoItem = { codigo: contadorCodigo++, producto, costo, unidades: 0 };
-    inventario.push(nuevoItem);
-    res.status(201).json(nuevoItem);
 });
 
-servidor.put("/inventario/:codigo", (req, res) => {
-    const codigo = Number(req.params.codigo);
-    const indice = inventario.findIndex((x) => x.codigo === codigo);
-    if (indice === -1) return res.status(404).json({ mensaje: "El producto no existe en el inventario" });
+app.patch("/inventario/:id", async (req, res) => {
+    try {
+        const { titulo, valor, existencias } = req.body;
+        
+        const [filas] = await db.query("SELECT * FROM productos WHERE id = ?", [req.params.id]);
+        if (filas.length === 0) {
+            return res.status(404).json({ error: "Artículo no encontrado" });
+        }
 
-    const { producto, costo, unidades } = req.body;
-    if (!producto || !esNumeroValido(costo) || !esNumeroValido(unidades)) {
-        return res.status(400).json({ mensaje: "Se requieren 'producto', 'costo' y 'unidades' válidos" });
+        const actual = filas[0];
+        const nuevoTitulo = titulo !== undefined ? titulo : actual.nombre;
+        const nuevoValor = valor !== undefined ? valor : actual.precio;
+        const nuevasExistencias = existencias !== undefined ? existencias : actual.stock;
+
+        await db.query(
+            "UPDATE productos SET nombre = ?, precio = ?, stock = ? WHERE id = ?",
+            [nuevoTitulo, nuevoValor, nuevasExistencias, req.params.id]
+        );
+
+        res.status(200).json({ id: Number(req.params.id), titulo: nuevoTitulo, valor: nuevoValor, existencias: nuevasExistencias });
+    } catch (error) {
+        res.status(500).json({ error: "Error en la base de datos" });
     }
-
-    inventario[indice] = { codigo, producto, costo, unidades };
-    res.status(200).json(inventario[indice]);
 });
 
-servidor.patch("/inventario/:codigo", (req, res) => {
-    const codigo = Number(req.params.codigo);
-    const item = inventario.find((x) => x.codigo === codigo);
-    if (!item) return res.status(404).json({ mensaje: "El producto no existe en el inventario" });
-
-    const { producto, costo, unidades } = req.body;
-    if (producto !== undefined) item.producto = producto;
-    if (costo !== undefined) item.costo = costo;
-    if (unidades !== undefined) item.unidades = unidades;
-
-    res.status(200).json(item);
+app.delete("/inventario/:id", async (req, res) => {
+    try {
+        const [resultado] = await db.query("DELETE FROM productos WHERE id = ?", [req.params.id]);
+        
+        if (resultado.affectedRows === 0) {
+            return res.status(404).json({ error: "Artículo no encontrado" });
+        }
+        
+        res.status(204).end();
+    } catch (error) {
+        res.status(500).json({ error: "Error en la base de datos" });
+    }
 });
 
-servidor.delete("/inventario/:codigo", (req, res) => {
-    const codigo = Number(req.params.codigo);
-    const indice = inventario.findIndex((x) => x.codigo === codigo);
-    if (indice === -1) return res.status(404).json({ mensaje: "El producto no existe en el inventario" });
-    inventario.splice(indice, 1);
-    res.status(204).end();
-});
-
-servidor.listen(3003, () => console.log("API de inventario activa en http://localhost:3003"));
+app.listen(3003, () => console.log("Servidor corriendo en http://localhost:3003"));
